@@ -7,9 +7,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/gorilla/mux"
+	"golang.org/x/time/rate"
 	_ "modernc.org/sqlite" // Changed this line
 )
 
@@ -27,6 +29,11 @@ type ShareRequest struct {
 }
 
 var db *sql.DB
+
+var (
+	rateLimiters     = make(map[string]*rate.Limiter)
+	rateLimiterMutex = &sync.RWMutex{}
+)
 
 func initDB() {
 	var err error
@@ -50,14 +57,64 @@ func initDB() {
 	}
 }
 
+// func cleanupExpired() {
+// 	for {
+// 		_, err := db.Exec("DELETE FROM shares WHERE expires_at < datetime('now')")
+// 		if err != nil {
+// 			log.Printf("Cleanup error: %v", err)
+// 		}
+// 		time.Sleep(1 * time.Minute)
+// 	}
+// }
+
 func cleanupExpired() {
-	for {
-		_, err := db.Exec("DELETE FROM shares WHERE expires_at < datetime('now')")
+	ticker := time.NewTicker(30 * time.Second) // More frequent cleanup
+	defer ticker.Stop()
+
+	for range ticker.C {
+		result, err := db.Exec("DELETE FROM shares WHERE expires_at < datetime('now')")
 		if err != nil {
 			log.Printf("Cleanup error: %v", err)
+			continue
 		}
-		time.Sleep(1 * time.Minute)
+
+		rowsAffected, err := result.RowsAffected()
+		if err != nil {
+			log.Printf("Failed to get rows affected: %v", err)
+			continue
+		}
+
+		if rowsAffected > 0 {
+			log.Printf("Cleaned up %d expired shares", rowsAffected)
+		}
 	}
+}
+
+func getRateLimiter(ip string) *rate.Limiter {
+	rateLimiterMutex.RLock()
+	limiter, exists := rateLimiters[ip]
+	rateLimiterMutex.RUnlock()
+
+	if !exists {
+		rateLimiterMutex.Lock()
+		limiter = rate.NewLimiter(rate.Every(time.Minute), 10) // 10 requests per minute
+		rateLimiters[ip] = limiter
+		rateLimiterMutex.Unlock()
+	}
+	return limiter
+}
+
+func rateLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ip := r.RemoteAddr
+		limiter := getRateLimiter(ip)
+
+		if !limiter.Allow() {
+			http.Error(w, "Rate limit exceeded", http.StatusTooManyRequests)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func checkCodeHandler(w http.ResponseWriter, r *http.Request) {
@@ -89,10 +146,6 @@ func shareHandler(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Missing code or data", http.StatusBadRequest)
 		return
 	}
-
-	// if req.ExpiresMinutes <= 0 || req.ExpiresMinutes > 60 {
-	// 	req.ExpiresMinutes = 10 // Default
-	// }
 
 	var expiresMinutes = 10
 
@@ -133,9 +186,6 @@ func receiveHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// DON'T delete - let it stay for the full 10 minutes
-	// The cleanupExpired() goroutine handles deletion
-
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{
 		"data": share.Data,
@@ -155,6 +205,7 @@ func main() {
 	go cleanupExpired()
 
 	r := mux.NewRouter()
+	r.Use(rateLimitMiddleware)
 	r.HandleFunc("/health", healthHandler).Methods("GET")
 	r.HandleFunc("/check/{code}", checkCodeHandler).Methods("GET")
 	r.HandleFunc("/share", shareHandler).Methods("POST")
@@ -168,5 +219,3 @@ func main() {
 	fmt.Printf("🚀 Relay server starting on port %s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
 }
-
-// $env:CGO_ENABLED=1; go run main.go
