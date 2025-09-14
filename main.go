@@ -57,16 +57,6 @@ func initDB() {
 	}
 }
 
-// func cleanupExpired() {
-// 	for {
-// 		_, err := db.Exec("DELETE FROM shares WHERE expires_at < datetime('now')")
-// 		if err != nil {
-// 			log.Printf("Cleanup error: %v", err)
-// 		}
-// 		time.Sleep(1 * time.Minute)
-// 	}
-// }
-
 func cleanupExpired() {
 	ticker := time.NewTicker(30 * time.Second) // More frequent cleanup
 	defer ticker.Stop()
