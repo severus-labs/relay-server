@@ -137,9 +137,11 @@ func shareHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var expiresMinutes = 10
+	if req.ExpiresMinutes <= 0 || req.ExpiresMinutes > 60 {
+		req.ExpiresMinutes = 10 // Default
+	}
 
-	expiresAt := time.Now().Add(time.Duration(expiresMinutes) * time.Minute)
+	expiresAt := time.Now().Add(time.Duration(req.ExpiresMinutes) * time.Minute)
 
 	_, err := db.Exec(
 		"INSERT OR REPLACE INTO shares (code, data, expires_at) VALUES (?, ?, ?)",
@@ -209,3 +211,5 @@ func main() {
 	fmt.Printf("🚀 Relay server starting on port %s\n", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
 }
+
+// go build -o relay-server
